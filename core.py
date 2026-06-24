@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from datetime import date
-from functools import lru_cache
 from types import SimpleNamespace
-from urllib.parse import quote
 
 import pandas as pd
 import numpy as np
@@ -11,8 +9,6 @@ import requests
 
 API_URL = "https://archive-api.open-meteo.com/v1/archive"
 GEOCODING_API_URL = "https://geocoding-api.open-meteo.com/v1/search"
-COUNTRIES_API_URL = "https://restcountries.com/v3.1/name"
-COUNTRY_CITIES_API_URL = "https://countriesnow.space/api/v0.1/countries/cities"
 MIN_YEAR = 1940
 
 
@@ -59,16 +55,12 @@ def validate_year(year):
     return year
 
 
-def search_locations(country, city, limit=8):
-    city, country = str(city).strip(), str(country).strip()
-    if not city:
-        return []
-
+def get_geocoding_results(query, count):
     response = requests.get(
         GEOCODING_API_URL,
         params={
-            "name": city,
-            "count": limit * 3,
+            "name": query,
+            "count": min(max(int(count), 1), 100),
             "language": "en",
             "format": "json",
         },
@@ -76,10 +68,25 @@ def search_locations(country, city, limit=8):
     )
     response.raise_for_status()
 
+    data = response.json()
+    if data.get("error"):
+        raise ValueError(data.get("reason", "The location search failed."))
+
+    results = data.get("results", [])
+    if not isinstance(results, list):
+        raise ValueError("The location search returned an unexpected response.")
+    return results
+
+
+def search_locations(country, city, limit=8):
+    city, country = str(city).strip(), str(country).strip()
+    if not city:
+        return []
+
     country_query, city_query = normalize_text(country), normalize_text(city)
     suggestions = []
 
-    for result in response.json().get("results", []):
+    for result in get_geocoding_results(city, limit * 4):
         result_country, result_city = result.get("country", ""), result.get("name", "")
 
         if country_query and not (
@@ -119,57 +126,39 @@ def search_countries(country, limit=8):
     if not country:
         return []
 
-    response = requests.get(
-        f"{COUNTRIES_API_URL}/{quote(country)}",
-        params={"fields": "name"},
-        timeout=15,
-    )
-    if response.status_code == 404:
-        return []
-    response.raise_for_status()
-
     suggestions, seen, country_query = [], set(), normalize_text(country)
-    for result in response.json():
-        common_name = result.get("name", {}).get("common", "")
-        normalized_name = normalize_text(common_name)
-        if not common_name or normalized_name in seen:
-            continue
+    for result in get_geocoding_results(country, max(limit * 12, 30)):
+        candidates = [result.get("country", "")]
+        if str(result.get("feature_code", "")).startswith("PCL"):
+            candidates.append(result.get("name", ""))
 
-        seen.add(normalized_name)
-        suggestions.append(suggestion(common_name, name=common_name))
+        for common_name in candidates:
+            normalized_name = normalize_text(common_name)
+            if (
+                not common_name
+                or country_query not in normalized_name
+                or normalized_name in seen
+            ):
+                continue
+
+            seen.add(normalized_name)
+            suggestions.append(suggestion(common_name, name=common_name))
 
     suggestions.sort(
         key=lambda item: (
+            normalize_text(item.name) != country_query,
             not normalize_text(item.name).startswith(country_query),
-            item.name,
+            normalize_text(item.name),
         )
     )
     return suggestions[:limit]
 
 
-@lru_cache(maxsize=64)
-def get_country_cities(country):
-    response = requests.post(COUNTRY_CITIES_API_URL, json={"country": country}, timeout=20)
-    response.raise_for_status()
-
-    data = response.json()
-    if data.get("error"):
-        raise ValueError(data.get("msg", "Cities were not found for that country."))
-
-    cities = data.get("data", [])
-    return tuple(sorted(set(city for city in cities if city), key=str.casefold))
-
-
-def search_country_cities(country, city="", limit=80):
-    country, city_query = str(country).strip(), normalize_text(city)
-    if not country:
+def search_country_cities(country, city="", limit=8):
+    country, city = str(country).strip(), str(city).strip()
+    if not country or not city:
         return []
-
-    return [
-        suggestion(city_name, name=city_name)
-        for city_name in get_country_cities(country)
-        if not city_query or city_name.casefold().startswith(city_query)
-    ][:limit]
+    return search_locations(country, city, limit=limit)
 
 
 def create_weather_request(country, city, year, location=None):

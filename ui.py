@@ -28,6 +28,7 @@ class RequestWindow:
         self.country_var = tk.StringVar()
         self.city_var = tk.StringVar()
         self.year_var = tk.StringVar(value=str(date.today().year))
+        self.lookup_status_var = tk.StringVar()
         self.suggestions = {"country": [], "city": [], "location": []}
         self.selected_location = None
         self.lookup_after_id = None
@@ -64,6 +65,13 @@ class RequestWindow:
         year_entry = self.add_field(panel, "Year", self.year_var, 2, combobox=True)
         year_entry.configure(values=[str(year) for year in range(date.today().year, MIN_YEAR - 1, -1)])
 
+        ttk.Label(
+            panel,
+            textvariable=self.lookup_status_var,
+            foreground=COLORS["muted"],
+            font=("Segoe UI", 9),
+        ).grid(row=3, column=1, sticky="w", pady=(0, 3))
+
         self.country_entry.bind("<KeyRelease>", lambda event: self.schedule_lookup("country", event))
         self.country_entry.bind("<<ComboboxSelected>>", self.select_country_value)
         self.city_entry.bind("<KeyRelease>", lambda event: self.schedule_lookup("city" if self.country_var.get().strip() else "location", event))
@@ -72,7 +80,7 @@ class RequestWindow:
         panel.columnconfigure(1, weight=1)
 
         actions = ttk.Frame(panel)
-        actions.grid(row=3, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        actions.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
 
         self.analyze_button = ttk.Button(
             actions,
@@ -114,12 +122,14 @@ class RequestWindow:
             self.city_entry.configure(values=[])
         if suggestion_kind == "city" and not country:
             self.set_combo_values("city", [])
+            self.lookup_status_var.set("")
             return
-        if suggestion_kind != "city" and len(query) < 1:
+        if len(query) < 2:
             self.set_combo_values(suggestion_kind, [])
+            self.lookup_status_var.set("Type at least 2 characters for suggestions.")
             return
 
-        suggestion_label = "cities" if suggestion_kind == "city" else f"{suggestion_kind}s"
+        self.lookup_status_var.set("Searching...")
         self.lookup_after_id = self.root.after(delay, lambda: self.lookup_suggestions(lookup_id, suggestion_kind, query))
 
     def lookup_suggestions(self, lookup_id, suggestion_kind, query):
@@ -157,10 +167,17 @@ class RequestWindow:
 
         if error:
             self.set_combo_values(suggestion_kind, [])
+            self.lookup_status_var.set(f"Suggestions unavailable: {error}")
+        elif suggestions:
+            self.lookup_status_var.set(f"{len(suggestions)} suggestion{'s' if len(suggestions) != 1 else ''} found.")
+        else:
+            self.lookup_status_var.set(f'No matches found for "{query}".')
 
     def set_combo_values(self, suggestion_kind, values):
         entry = self.country_entry if suggestion_kind == "country" else self.city_entry
         entry.configure(values=values)
+        if values and self.root.focus_get() == entry:
+            entry.after_idle(lambda: entry.event_generate("<Down>"))
 
     def select_country_value(self, event=None):
         label = self.country_var.get()
@@ -184,8 +201,11 @@ class RequestWindow:
                     self.country_var.set(suggestion.country)
                     self.city_var.set(suggestion.city)
                 else:
-                    self.city_var.set(suggestion.name)
+                    self.selected_location = suggestion
+                    self.country_var.set(suggestion.country)
+                    self.city_var.set(suggestion.city)
                 break
+
     def analyze(self):
         if self.is_loading:
             return
